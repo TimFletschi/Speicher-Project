@@ -1,11 +1,180 @@
 <!doctype html>
-<html lang="en">
+<html lang="de">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Hello World</title>
+    <title>Kabelberechnungstool</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        font-family: Arial, sans-serif;
+        background: linear-gradient(135deg, rgb(0, 120, 0), rgb(0, 200, 0), rgb(120, 255, 120));
+      }
+
+      .card {
+        width: min(95vw, 680px);
+        padding: 28px 24px;
+        border-radius: 16px;
+        background: rgb(225, 255, 225);
+        box-shadow: 0 12px 34px rgba(0, 120, 0, 0.35);
+      }
+
+      h1 {
+        margin: 0 0 22px;
+        text-align: center;
+        color: rgb(0, 110, 0);
+      }
+
+      .form-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      label {
+        font-weight: 600;
+        color: rgb(0, 100, 0);
+      }
+
+      input,
+      select {
+        width: 100%;
+        padding: 11px 12px;
+        border: 1px solid rgb(120, 220, 120);
+        border-radius: 10px;
+        font-size: 16px;
+        background: rgb(245, 255, 245);
+      }
+
+      input:focus,
+      select:focus {
+        outline: none;
+        border-color: rgb(0, 255, 0);
+        box-shadow: 0 0 0 3px rgba(0, 255, 0, 0.25);
+      }
+
+      button {
+        width: 100%;
+        margin-top: 16px;
+        padding: 11px 12px;
+        border: none;
+        border-radius: 10px;
+        font-size: 16px;
+        font-weight: 600;
+        color: rgb(0, 70, 0);
+        background: rgb(0, 255, 0);
+        cursor: pointer;
+        transition: transform 0.12s ease, background 0.2s ease, box-shadow 0.2s ease;
+      }
+
+      button:hover {
+        background: rgb(90, 255, 90);
+        box-shadow: 0 6px 14px rgba(0, 160, 0, 0.3);
+      }
+
+      button:active {
+        transform: scale(0.98);
+      }
+
+      .hint {
+        margin-top: 14px;
+        text-align: center;
+        color: rgb(0, 100, 0);
+        font-size: 14px;
+      }
+
+      #result {
+        min-height: 24px;
+        margin-top: 10px;
+        text-align: center;
+        font-weight: 600;
+        color: rgb(0, 85, 0);
+      }
+    </style>
   </head>
   <body>
-    <h1>Hello, World!</h1>
+    <main class="card">
+      <h1>Kabelberechnungstool</h1>
+
+      <form id="kabelForm" class="form-grid">
+        <div class="field">
+          <label for="leitungslaenge">Leitungslänge [m]</label>
+          <input id="leitungslaenge" name="leitungslaenge" type="number" step="any" placeholder="z. B. 25" />
+        </div>
+
+        <div class="field">
+          <label for="spannung">Spannung in [V]</label>
+          <input id="spannung" name="spannung" type="number" step="any" placeholder="z. B. 400" />
+        </div>
+
+        <div class="field">
+          <label for="leistung">Leistung in [kW]</label>
+          <input id="leistung" name="leistung" type="number" step="any" placeholder="z. B. 11" />
+        </div>
+
+        <div class="field">
+          <label for="umgebungstemperatur">Umgebungstemperatur</label>
+          <input id="umgebungstemperatur" name="umgebungstemperatur" type="number" step="any" placeholder="z. B. 30" />
+        </div>
+
+        <div class="field">
+          <label for="leitungsart">Leitungsart</label>
+          <input id="leitungsart" name="leitungsart" type="text" placeholder="z. B. NYM, NAYY ..." />
+        </div>
+
+        <div class="field">
+          <label for="verlegeart">Verlegeart</label>
+          <input id="verlegeart" name="verlegeart" type="text" placeholder="z. B. A1, B2, C ..." />
+        </div>
+
+        <div class="field">
+          <label for="buendelung">Bündelung</label>
+          <select id="buendelung" name="buendelung">
+            <option value="">Bitte wählen</option>
+            <option value="ja">Ja</option>
+            <option value="nein">Nein</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="artBuendelung">Art der Bündelung</label>
+          <input id="artBuendelung" name="artBuendelung" type="text" placeholder="z. B. auf Kabelpritsche" />
+        </div>
+
+        <div class="field">
+          <label for="cosphi">cos(phi)</label>
+          <input id="cosphi" name="cosphi" type="number" step="any" min="0" max="1" placeholder="z. B. 0.95" />
+        </div>
+
+        <button id="calcButton" type="button">Berechnen</button>
+      </form>
+
+      <p class="hint">Formeln und Ausgabe-Logik ergänzen wir im nächsten Schritt.</p>
+      <p id="result"></p>
+    </main>
+
+    <script>
+      const calcButton = document.getElementById('calcButton');
+      const result = document.getElementById('result');
+
+      calcButton.addEventListener('click', () => {
+        result.textContent = 'Berechnung wird ergänzt, sobald du mir die Formeln gibst.';
+      });
+    </script>
   </body>
 </html>
