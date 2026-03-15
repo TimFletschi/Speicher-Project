@@ -279,4 +279,3 @@ def plot_average_price_by_hour():
 
 plot_average_price_by_hour()
 
-# helllo

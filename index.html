@@ -4,6 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Kabelberechnungstool</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
     <style>
       * {
         box-sizing: border-box;
@@ -21,7 +22,7 @@
       }
 
       .card {
-        width: min(95vw, 680px);
+        width: min(95vw, 980px);
         padding: 28px 24px;
         border-radius: 16px;
         background: rgb(225, 255, 225);
@@ -105,6 +106,40 @@
         font-weight: 600;
         color: rgb(0, 85, 0);
       }
+
+      .charts {
+        margin-top: 26px;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 18px;
+      }
+
+      .chart-card {
+        background: rgb(236, 255, 236);
+        border: 1px solid rgb(160, 235, 160);
+        border-radius: 12px;
+        padding: 14px;
+      }
+
+      .chart-title {
+        margin: 0 0 10px;
+        font-size: 16px;
+        font-weight: 700;
+        color: rgb(0, 100, 0);
+      }
+
+      .chart-wrap {
+        position: relative;
+        width: 100%;
+        height: 320px;
+      }
+
+      .status {
+        margin-top: 12px;
+        text-align: center;
+        color: rgb(0, 90, 0);
+        font-size: 14px;
+      }
     </style>
   </head>
   <body>
@@ -166,15 +201,259 @@
 
       <p class="hint">Formeln und Ausgabe-Logik ergänzen wir im nächsten Schritt.</p>
       <p id="result"></p>
+
+      <section class="charts">
+        <div class="chart-card">
+          <h2 class="chart-title">PV-Erzeugung stündlich</h2>
+          <div class="chart-wrap"><canvas id="pvHourlyChart"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+          <h2 class="chart-title">PV-Erzeugung wöchentlich gemittelt</h2>
+          <div class="chart-wrap"><canvas id="pvWeeklyChart"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+          <h2 class="chart-title">Erlöse stündlich (Erzeugung × Spotmarktpreis)</h2>
+          <div class="chart-wrap"><canvas id="revenueHourlyChart"></canvas></div>
+        </div>
+
+        <div class="chart-card">
+          <h2 class="chart-title">Monatliche Erlöse (summiert)</h2>
+          <div class="chart-wrap"><canvas id="revenueMonthlyChart"></canvas></div>
+        </div>
+      </section>
+
+      <p id="chartStatus" class="status">Lade PV- und Spotmarktdaten …</p>
     </main>
 
     <script>
       const calcButton = document.getElementById('calcButton');
       const result = document.getElementById('result');
+      const chartStatus = document.getElementById('chartStatus');
+
+      const chartPalette = {
+        line: 'rgb(0, 170, 0)',
+        lineFill: 'rgba(0, 255, 0, 0.15)',
+        lineDark: 'rgb(0, 110, 0)',
+        bar: 'rgba(0, 200, 0, 0.75)',
+        barBorder: 'rgb(0, 130, 0)',
+      };
+
+      function parseGermanNumber(value) {
+        if (value === undefined || value === null) {
+          return NaN;
+        }
+
+        const cleaned = String(value).trim().replace(',', '.');
+        return Number(cleaned);
+      }
+
+      function parsePvDateTime(pvTime, year) {
+        const match = String(pvTime).match(/^(\d{2})\.(\d{2})\.\s*(\d{2}):(\d{2})$/);
+        if (!match) {
+          return null;
+        }
+
+        const day = Number(match[1]);
+        const month = Number(match[2]);
+        const hour = Number(match[3]);
+        const minute = Number(match[4]);
+        return new Date(year, month - 1, day, hour, minute, 0, 0);
+      }
+
+      function parseSpotDate(dateText) {
+        const match = String(dateText).match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+        if (!match) {
+          return null;
+        }
+
+        const day = Number(match[1]);
+        const month = Number(match[2]);
+        const year = Number(match[3]);
+        return new Date(year, month - 1, day, 0, 0, 0, 0);
+      }
+
+      function parseCsvRows(csvText) {
+        return csvText
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0)
+          .map((line) => line.split(';'));
+      }
+
+      function getIsoWeekKey(date) {
+        const workingDate = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+        const dayNumber = workingDate.getUTCDay() || 7;
+        workingDate.setUTCDate(workingDate.getUTCDate() + 4 - dayNumber);
+        const yearStart = new Date(Date.UTC(workingDate.getUTCFullYear(), 0, 1));
+        const weekNo = Math.ceil(((workingDate - yearStart) / 86400000 + 1) / 7);
+        return `${workingDate.getUTCFullYear()}-KW${String(weekNo).padStart(2, '0')}`;
+      }
+
+      function createLineChart(canvasId, labels, data, labelText) {
+        const ctx = document.getElementById(canvasId);
+        return new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels,
+            datasets: [
+              {
+                label: labelText,
+                data,
+                borderColor: chartPalette.line,
+                backgroundColor: chartPalette.lineFill,
+                borderWidth: 1.6,
+                fill: true,
+                pointRadius: 0,
+                tension: 0.12,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+              legend: { display: true },
+            },
+            scales: {
+              x: {
+                ticks: { maxTicksLimit: 14, color: 'rgb(0, 95, 0)' },
+                grid: { color: 'rgba(0, 130, 0, 0.12)' },
+              },
+              y: {
+                ticks: { color: 'rgb(0, 95, 0)' },
+                grid: { color: 'rgba(0, 130, 0, 0.12)' },
+              },
+            },
+          },
+        });
+      }
+
+      function createBarChart(canvasId, labels, data, labelText) {
+        const ctx = document.getElementById(canvasId);
+        return new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [
+              {
+                label: labelText,
+                data,
+                backgroundColor: chartPalette.bar,
+                borderColor: chartPalette.barBorder,
+                borderWidth: 1,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+              legend: { display: true },
+            },
+            scales: {
+              x: {
+                ticks: { color: 'rgb(0, 95, 0)' },
+                grid: { color: 'rgba(0, 130, 0, 0.12)' },
+              },
+              y: {
+                ticks: { color: 'rgb(0, 95, 0)' },
+                grid: { color: 'rgba(0, 130, 0, 0.12)' },
+              },
+            },
+          },
+        });
+      }
+
+      async function loadAndPlotEnergyData() {
+        try {
+          const [pvResponse, spotResponse] = await Promise.all([fetch('./PV-Daten.csv'), fetch('./Spotmarktpreis.csv')]);
+
+          if (!pvResponse.ok || !spotResponse.ok) {
+            throw new Error('CSV-Dateien konnten nicht geladen werden.');
+          }
+
+          const [pvText, spotText] = await Promise.all([pvResponse.text(), spotResponse.text()]);
+          const pvRows = parseCsvRows(pvText).slice(1);
+          const spotRows = parseCsvRows(spotText).slice(1);
+
+          const count = Math.min(pvRows.length, spotRows.length);
+          const hourlyLabels = [];
+          const pvHourly = [];
+          const revenueHourly = [];
+
+          const weeklyAgg = new Map();
+          const monthlyRevenue = new Map();
+
+          for (let i = 0; i < count; i += 1) {
+            const pvRow = pvRows[i];
+            const spotRow = spotRows[i];
+
+            const pvTimeText = pvRow?.[0] ?? '';
+            const pvValue = parseGermanNumber(pvRow?.[1]);
+            const spotDate = parseSpotDate(spotRow?.[0]);
+            const spotPrice = parseGermanNumber(spotRow?.[1]);
+
+            if (!spotDate || Number.isNaN(pvValue) || Number.isNaN(spotPrice)) {
+              continue;
+            }
+
+            const date = parsePvDateTime(pvTimeText, spotDate.getFullYear()) ?? spotDate;
+            const label = date.toLocaleString('de-DE', {
+              day: '2-digit',
+              month: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit',
+            });
+
+            const rev = pvValue * spotPrice;
+
+            hourlyLabels.push(label);
+            pvHourly.push(pvValue);
+            revenueHourly.push(rev);
+
+            const weekKey = getIsoWeekKey(date);
+            const weekState = weeklyAgg.get(weekKey) ?? { sum: 0, n: 0 };
+            weekState.sum += pvValue;
+            weekState.n += 1;
+            weeklyAgg.set(weekKey, weekState);
+
+            const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+            monthlyRevenue.set(monthKey, (monthlyRevenue.get(monthKey) ?? 0) + rev);
+          }
+
+          const weeklyLabels = [];
+          const weeklyMeanValues = [];
+          for (const [key, state] of weeklyAgg.entries()) {
+            weeklyLabels.push(key);
+            weeklyMeanValues.push(state.n > 0 ? state.sum / state.n : 0);
+          }
+
+          const monthlyLabels = [];
+          const monthlyValues = [];
+          for (const [key, value] of monthlyRevenue.entries()) {
+            monthlyLabels.push(key);
+            monthlyValues.push(value);
+          }
+
+          createLineChart('pvHourlyChart', hourlyLabels, pvHourly, 'PV stündlich');
+          createLineChart('pvWeeklyChart', weeklyLabels, weeklyMeanValues, 'PV Wochenmittel');
+          createLineChart('revenueHourlyChart', hourlyLabels, revenueHourly, 'Erlös stündlich');
+          createBarChart('revenueMonthlyChart', monthlyLabels, monthlyValues, 'Erlös monatlich (Summe)');
+
+          chartStatus.textContent = `Daten geladen: ${pvHourly.length} Stundenwerte.`;
+        } catch (error) {
+          chartStatus.textContent = `Fehler beim Laden/Plotten der Daten: ${error.message}`;
+        }
+      }
 
       calcButton.addEventListener('click', () => {
         result.textContent = 'Berechnung wird ergänzt, sobald du mir die Formeln gibst.';
       });
+
+      loadAndPlotEnergyData();
     </script>
   </body>
 </html>
