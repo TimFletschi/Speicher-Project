@@ -1,0 +1,34 @@
+parameter;value
+path_prices;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\Spotmarktpreis.csv
+path_pv;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\PV-Daten_400kwp_stuendlich.csv
+path_bdew_g0;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\G0Verbrauch_400.000kwh_stuendlich.csv
+pv_size_kwp;312
+pv_reference_kwp;400.0
+pv_specific_yield_kwh_per_kwp_per_year;
+annual_consumption_kwh;232000
+g0_reference_annual_kwh;400000.0
+eta_ch;0.95
+eta_dis;0.95
+horizon_years;15
+batt_capacity_retention_after_horizon;0.8
+price_in_ct_per_kwh;True
+pv_to_load_remuneration_eur_per_kwh;0.14
+batt_to_load_remuneration_eur_per_kwh;0.14
+capex_batt_E_eur_per_kwh;230.0
+storage_opex_pct_of_invest_per_year;0.01
+meter_cost_eur_per_year;300.0
+marketer_share_of_battery_revenue;0.1
+pv_direct_marketing_cost_eur_per_month;60.0
+batt_E_bounds;(0.0, 120000.0)
+fixed_batt_E_kwh;
+fixed_batt_P_kw;
+cbc_executable;C:\Users\TimFletschinger\Downloads\cbc\bin\cbc.exe
+use_binary_charge_switch;True
+solver_tee;False
+cbc_time_limit_sec;300
+cbc_mip_gap;0.01
+cbc_threads;0
+export_dir;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\exports
+template_word_path;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\PDF\VORLAGE_Ausführungsbeschreibung_PVA_Kunde1.docx
+plot_start_date;2024-07-01
+plot_n_days;14

@@ -1,14 +1,13 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 from pyomo.environ import (
     Binary,
     ConcreteModel,
     Constraint,
+    UnitInterval,
     NonNegativeReals,
     Objective,
     RangeSet,
@@ -158,6 +157,8 @@ class Inputs:
     eta_dis: float = 0.95
 
     horizon_years: int = 15
+    # Degradation: Restkapazität am Ende des Horizonts (z.B. 0.80 nach 15 Jahren)
+    batt_capacity_retention_after_horizon: float = 0.80
     price_in_ct_per_kwh: bool = True
     # Getrennte Vergütung für Eigenverbrauch, in €/kWh
     pv_to_load_remuneration_eur_per_kwh: float = 0.14
@@ -170,15 +171,38 @@ class Inputs:
     pv_direct_marketing_cost_eur_per_month: float = 60.0
 
     batt_E_bounds: tuple[float, float] = (0.0, 120000.0)
-    fixed_batt_E_kwh: float | None = 450
-    fixed_batt_P_kw: float | None = 220
+    fixed_batt_E_kwh: float | None = None
+    fixed_batt_P_kw: float | None = None
 
     cbc_executable: str = r"C:\Users\TimFletschinger\Downloads\cbc\bin\cbc.exe"
+    # Laufzeit-Optimierung
+    use_binary_charge_switch: bool = True
+    solver_tee: bool = False
+    cbc_time_limit_sec: int = 300
+    cbc_mip_gap: float = 0.01
+    cbc_threads: int = 0
+    export_dir: Path = Path(r"C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\exports")
+    template_word_path: Path | None = Path(r"C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\PDF\VORLAGE_Ausführungsbeschreibung_PVA_Kunde1.docx")
+    plot_start_date: str = "2024-07-01"
+    plot_n_days: int = 14
 
 
 # =============================================================
 # 3) MODELLAUFBAU
 # =============================================================
+def capacity_degradation_multiplier(inp: Inputs) -> float:
+    """Linearer Degradationsfaktor über den Horizont.
+
+    Beispiel: Start 100%, Ende 80% nach 15 Jahren -> mittlere Verfügbarkeit 90%.
+    Der jährliche Mehrwert wird mit diesem mittleren Faktor über den Horizont skaliert.
+    """
+    if inp.horizon_years <= 0:
+        raise ValueError("horizon_years muss > 0 sein.")
+    if not (0.0 < inp.batt_capacity_retention_after_horizon <= 1.0):
+        raise ValueError("batt_capacity_retention_after_horizon muss im Intervall (0, 1] liegen.")
+    return 0.5 * (1.0 + inp.batt_capacity_retention_after_horizon)
+
+
 def build_model(prices: np.ndarray, pv_per_kwp: np.ndarray, load: np.ndarray, inp: Inputs) -> ConcreteModel:
     T = len(prices)
     m = ConcreteModel()
@@ -207,6 +231,15 @@ def build_model(prices: np.ndarray, pv_per_kwp: np.ndarray, load: np.ndarray, in
         m.E_max.fix(inp.fixed_batt_E_kwh)
         m.P_max.fix(inp.fixed_batt_P_kw)
 
+    # Lineares Big-M für Lade-/Entlade-Logik (verhindert Nichtlinearität mm.P_max * binary)
+    if inp.fixed_batt_P_kw is not None:
+        p_big_m = float(inp.fixed_batt_P_kw)
+    else:
+        # Bei 2h-Beziehung gilt P_max = E_max / 2
+        p_big_m = float(inp.batt_E_bounds[1]) / 2.0
+    if p_big_m <= 0:
+        raise ValueError("Ungültiges Big-M für Leistung. Bitte batt_E_bounds oder fixed_batt_P_kw prüfen.")
+
     m.sell_pv = Var(m.T, domain=NonNegativeReals)
     m.sell_batt = Var(m.T, domain=NonNegativeReals)
     m.pv_to_load = Var(m.T, domain=NonNegativeReals)
@@ -216,7 +249,11 @@ def build_model(prices: np.ndarray, pv_per_kwp: np.ndarray, load: np.ndarray, in
     m.dis = Var(m.T, domain=NonNegativeReals)
     m.soc = Var(m.T, domain=NonNegativeReals)
     m.pv_spill = Var(m.T, domain=NonNegativeReals)
-    m.is_charging = Var(m.T, domain=Binary)
+    if inp.use_binary_charge_switch:
+        m.is_charging = Var(m.T, domain=Binary)
+    else:
+        # LP-Modus (schneller): Relaxierung statt binärer Variable
+        m.is_charging = Var(m.T, domain=UnitInterval)
 
     m.soc[0].fix(0.0)
     m.soc_cycle = Constraint(expr=m.soc[T - 1] == m.soc[0])
@@ -249,14 +286,15 @@ def build_model(prices: np.ndarray, pv_per_kwp: np.ndarray, load: np.ndarray, in
     m.soc_cap = Constraint(m.T, rule=lambda mm, t: mm.soc[t] <= mm.E_max)
     m.charge_cap = Constraint(m.T, rule=lambda mm, t: mm.ch[t] <= mm.P_max)
     m.discharge_cap = Constraint(m.T, rule=lambda mm, t: mm.dis[t] <= mm.P_max)
-    m.charge_or_discharge_1 = Constraint(m.T, rule=lambda mm, t: mm.ch[t] <= mm.P_max * mm.is_charging[t])
-    m.charge_or_discharge_2 = Constraint(m.T, rule=lambda mm, t: mm.dis[t] <= mm.P_max * (1 - mm.is_charging[t]))
+    m.charge_or_discharge_1 = Constraint(m.T, rule=lambda mm, t: mm.ch[t] <= p_big_m * mm.is_charging[t])
+    m.charge_or_discharge_2 = Constraint(m.T, rule=lambda mm, t: mm.dis[t] <= p_big_m * (1 - mm.is_charging[t]))
 
     # 2h Speicher nur im Optimierungsmodus
     if optimize_battery_size:
         m.storage_2h = Constraint(expr=m.E_max == 2.0 * m.P_max)
 
     def objective_rule(mm):
+        degr_mult = capacity_degradation_multiplier(inp)
         pv_feed_in_value = sum(prices[t] * mm.sell_pv[t] for t in mm.T)
         batt_feed_in_value = sum(prices[t] * mm.sell_batt[t] for t in mm.T)
         battery_charging_opportunity_cost = sum(prices[t] * mm.ch[t] for t in mm.T)
@@ -292,7 +330,7 @@ def build_model(prices: np.ndarray, pv_per_kwp: np.ndarray, load: np.ndarray, in
         )
         annual_pv_only_net_baseline = annual_value_only_pv_baseline - annual_pv_direct_marketing_cost
         annual_incremental_storage_value = annual_net_value - annual_pv_only_net_baseline
-        total_value = inp.horizon_years * annual_incremental_storage_value
+        total_value = inp.horizon_years * degr_mult * annual_incremental_storage_value
         storage_cost = inp.capex_batt_E_eur_per_kwh * mm.E_max
         return total_value - storage_cost
 
@@ -305,10 +343,19 @@ def build_model(prices: np.ndarray, pv_per_kwp: np.ndarray, load: np.ndarray, in
 # =============================================================
 def solve_model(model: ConcreteModel, inp: Inputs):
     solver = SolverFactory("cbc", executable=inp.cbc_executable)
-    return solver.solve(model, tee=True)
+    if inp.cbc_time_limit_sec > 0:
+        solver.options["seconds"] = int(inp.cbc_time_limit_sec)
+    if inp.cbc_mip_gap is not None and inp.cbc_mip_gap > 0:
+        solver.options["ratioGap"] = float(inp.cbc_mip_gap)
+    if inp.cbc_threads is not None and inp.cbc_threads > 0:
+        solver.options["threads"] = int(inp.cbc_threads)
+    return solver.solve(model, tee=inp.solver_tee)
 
 
 def evaluate_results(model: ConcreteModel, prices: np.ndarray, pv_per_kwp: np.ndarray, load: np.ndarray, inp: Inputs) -> dict:
+    degr_mult = capacity_degradation_multiplier(inp)
+    effective_years_with_degradation = inp.horizon_years * degr_mult
+
     T = len(prices)
     E_opt = value(model.E_max)
     P_opt = value(model.P_max)
@@ -362,7 +409,7 @@ def evaluate_results(model: ConcreteModel, prices: np.ndarray, pv_per_kwp: np.nd
 
     annual_net_value_with_storage = annual_value_with_storage - annual_total_recurring_costs_eur
     annual_delta = annual_net_value_with_storage - annual_value_only_pv_net
-    total_delta = inp.horizon_years * annual_delta
+    total_delta = effective_years_with_degradation * annual_delta
 
     sell_pv = np.array([value(model.sell_pv[t]) for t in range(T)])
     sell_batt = np.array([value(model.sell_batt[t]) for t in range(T)])
@@ -402,6 +449,9 @@ def evaluate_results(model: ConcreteModel, prices: np.ndarray, pv_per_kwp: np.nd
         "annual_net_value_with_storage": annual_net_value_with_storage,
         "annual_delta": annual_delta,
         "total_delta": total_delta,
+        "batt_capacity_retention_after_horizon": inp.batt_capacity_retention_after_horizon,
+        "capacity_degradation_multiplier": degr_mult,
+        "effective_years_with_degradation": effective_years_with_degradation,
         "storage_cost": storage_cost,
         "annual_storage_opex_eur": annual_storage_opex_eur,
         "annual_meter_cost_eur": annual_meter_cost_eur,
@@ -439,6 +489,7 @@ def evaluate_results(model: ConcreteModel, prices: np.ndarray, pv_per_kwp: np.nd
         "grid_import": grid_import,
         "ch": ch,
         "dis": dis,
+        "soc": soc,
         "curtailment": curtailment,
     }
 
@@ -487,6 +538,9 @@ def print_results(results: dict, inp: Inputs):
     print(f"Mehrerlös vor Fixkosten:              {results['annual_delta_before_fixed_costs']:,.2f} €")
     print(f"Mehrerlös nach Fixkosten:             {results['annual_delta_after_fixed_costs']:,.2f} €")
     print(f"Mehrerlös Speicher pro Jahr (netto):  {results['annual_delta']:,.2f} €")
+    print(f"Restkapazität nach {inp.horizon_years} Jahren:      {100*results['batt_capacity_retention_after_horizon']:,.1f} %")
+    print(f"Degradationsfaktor (linear gemittelt): {results['capacity_degradation_multiplier']:,.3f}")
+    print(f"Effektive Jahre (mit Degradation):     {results['effective_years_with_degradation']:,.2f}")
     print(f"Mehrwert über {inp.horizon_years} Jahre:             {results['total_delta']:,.2f} €")
     print(f"Speicherkosten (E-basiert):           {results['storage_cost']:,.2f} €")
     print(f"Speicherkosten - Mehrwert:            {diff_cost_vs_benefit:,.2f} €")
@@ -495,176 +549,122 @@ def print_results(results: dict, inp: Inputs):
 
 
 # =============================================================
-# 5) PLOTS
+# 5) EXPORT
 # =============================================================
-def plot_soc(model: ConcreteModel, T: int):
-    soc = np.array([value(model.soc[t]) for t in range(T)])
-    plt.figure(figsize=(14, 4))
-    plt.plot(soc, linewidth=1.2)
-    plt.title("SOC über das Jahr")
-    plt.xlabel("Stunden-Intervall")
-    plt.ylabel("SOC [kWh]")
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.show()
+def export_results_and_timeseries(results: dict, prices: np.ndarray, inp: Inputs) -> dict[str, Path]:
+    out_dir = inp.export_dir
+    if out_dir.parent.exists() and not out_dir.parent.is_dir():
+        raise NotADirectoryError(
+            f"Exportpfad ungültig: Der Parent-Pfad ist eine Datei und kein Ordner: {out_dir.parent}. "
+            "Bitte inp.export_dir auf einen echten Ordner setzen (z. B. ...\\04 Simulation\\exports)."
+        )
+    if out_dir.exists() and not out_dir.is_dir():
+        raise NotADirectoryError(
+            f"Exportpfad ungültig: {out_dir} ist eine Datei, aber es wird ein Ordner benötigt."
+        )
+    out_dir.mkdir(parents=True, exist_ok=True)
 
+    T = len(prices)
+    time_idx = pd.date_range("2024-01-01 00:00:00", periods=T, freq="1h")
 
-def plot_avg_charge_discharge_by_hour(ch: np.ndarray, dis: np.ndarray):
-    steps_per_day = 24
-    n_days = len(ch) // steps_per_day
-    if n_days == 0:
-        return
+    sell_pv = results["sell_pv"]
+    sell_batt = results["sell_batt"]
+    pv_to_load = results["pv_to_load"]
+    batt_to_load = results["batt_to_load"]
+    ch = results["ch"]
 
-    ch_day = ch[: n_days * steps_per_day].reshape(n_days, steps_per_day)
-    dis_day = dis[: n_days * steps_per_day].reshape(n_days, steps_per_day)
-    ch_hour = ch_day
-    dis_hour = dis_day
+    rev_pv_feed_in = prices * sell_pv
+    rev_batt_feed_in = prices * sell_batt
+    rev_pv_to_load = inp.pv_to_load_remuneration_eur_per_kwh * pv_to_load
+    rev_batt_to_load = inp.batt_to_load_remuneration_eur_per_kwh * batt_to_load
+    cost_charge_opportunity = prices * ch
 
-    hours = np.arange(24)
-    plt.figure(figsize=(12, 5))
-    plt.plot(hours, ch_hour.mean(axis=0), marker="o", linewidth=2, label="Laden")
-    plt.plot(hours, dis_hour.mean(axis=0), marker="o", linewidth=2, label="Entladen")
-    plt.xticks(hours)
-    plt.xlabel("Stunde des Tages")
-    plt.ylabel("Energie [kWh pro Stunde]")
-    plt.title("Gemittelte Lade-/Entladezeiten pro Tag")
-    plt.grid(alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-
-def _date_window_indices(n_steps: int, start_date: str, n_days: int) -> tuple[pd.DatetimeIndex, int, int]:
-    idx = pd.date_range("2024-01-01 00:00:00", periods=n_steps, freq="1h")
-    start_ts = pd.Timestamp(start_date)
-    end_ts = start_ts + pd.Timedelta(days=n_days)
-    s = int(idx.searchsorted(start_ts, side="left"))
-    e = int(idx.searchsorted(end_ts, side="left"))
-    s = max(0, min(s, n_steps))
-    e = max(0, min(e, n_steps))
-    return idx, s, e
-
-
-def plot_energy_balance(results: dict, start_date: str = "2024-07-01", n_days: int = 14):
-    T = len(results["pv_gen"])
-    time_idx, s, e = _date_window_indices(T, start_date, n_days)
-    if s >= e:
-        return
-
-    x = time_idx[s:e]
-    pv_gen = results["pv_gen"][s:e]
-    load = results["load"][s:e]
-    sell_pv = results["sell_pv"][s:e]
-    sell_batt = results["sell_batt"][s:e]
-    pv_to_load = results["pv_to_load"][s:e]
-    batt_to_load = results["batt_to_load"][s:e]
-    grid_import = results["grid_import"][s:e]
-    ch = results["ch"][s:e]
-    non_feedin_neg_price = results["curtailment"][s:e]
-
-    fig, axes = plt.subplots(2, 1, figsize=(16, 9), sharex=True)
-
-    axes[0].plot(x, pv_gen, color="black", linewidth=1.2, label="PV-Erzeugung")
-    axes[0].stackplot(
-        x,
-        pv_to_load,
-        sell_pv,
-        ch,
-        non_feedin_neg_price,
-        labels=["PV -> Last", "PV -> Netz", "PV -> Speicher", "Nicht-Einspeisung (Preis negativ)"],
-        alpha=0.8,
+    cost_storage_opex = np.full(T, results["annual_storage_opex_eur"] / T)
+    cost_meter = np.full(T, results["annual_meter_cost_eur"] / T)
+    cost_pv_direct_marketing = np.full(T, results["annual_pv_direct_marketing_cost_eur"] / T)
+    cost_battery_marketer = inp.marketer_share_of_battery_revenue * (
+        rev_batt_feed_in + rev_batt_to_load - cost_charge_opportunity
     )
-    axes[0].set_title("Aufteilung der PV-Erzeugung")
-    axes[0].set_ylabel("Energie [kWh/h]")
-    axes[0].grid(alpha=0.3)
-    axes[0].legend(loc="upper right")
-    axes[0].xaxis.set_major_locator(mdates.DayLocator(interval=2))
-    axes[0].xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
 
-    axes[1].stackplot(
-        x,
-        pv_to_load,
-        batt_to_load,
-        grid_import,
-        sell_pv,
-        sell_batt,
-        labels=["PV -> Last", "Speicher -> Last", "Netzbezug", "PV -> Netz", "Speicher -> Netz"],
-        alpha=0.85,
+    ts = pd.DataFrame(
+        {
+            "timestamp": time_idx,
+            "price_eur_per_kwh": prices,
+            "pv_gen_kwh": results["pv_gen"],
+            "load_kwh": results["load"],
+            "sell_pv_kwh": sell_pv,
+            "sell_batt_kwh": sell_batt,
+            "pv_to_load_kwh": pv_to_load,
+            "batt_to_load_kwh": batt_to_load,
+            "grid_import_kwh": results["grid_import"],
+            "ch_kwh": ch,
+            "dis_kwh": results["dis"],
+            "soc_kwh": results["soc"],
+            "curtailment_kwh": results["curtailment"],
+            "rev_pv_feed_in_eur": rev_pv_feed_in,
+            "rev_batt_feed_in_eur": rev_batt_feed_in,
+            "rev_pv_to_load_eur": rev_pv_to_load,
+            "rev_batt_to_load_eur": rev_batt_to_load,
+            "cost_charge_opportunity_eur": cost_charge_opportunity,
+            "cost_storage_opex_eur": cost_storage_opex,
+            "cost_meter_eur": cost_meter,
+            "cost_pv_direct_marketing_eur": cost_pv_direct_marketing,
+            "cost_battery_marketer_eur": cost_battery_marketer,
+        }
     )
-    axes[1].plot(x, load, color="black", linewidth=1.0, label="Last")
-    axes[1].set_title("Lastdeckung und Einspeisung")
-    axes[1].set_xlabel("Datum")
-    axes[1].set_ylabel("Energie [kWh/h]")
-    axes[1].grid(alpha=0.3)
-    axes[1].legend(loc="upper right")
-    axes[1].xaxis.set_major_locator(mdates.DayLocator(interval=2))
-    axes[1].xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
 
-    plt.tight_layout()
-    plt.show()
+    ts["cum_price_sum"] = ts["price_eur_per_kwh"].cumsum()
+    ts["cum_price_positive_sum"] = ts["price_eur_per_kwh"].clip(lower=0.0).cumsum()
+    ts["cum_price_negative_sum"] = ts["price_eur_per_kwh"].clip(upper=0.0).cumsum()
 
+    ts["cum_rev_pv_feed_in_eur"] = ts["rev_pv_feed_in_eur"].cumsum()
+    ts["cum_rev_batt_feed_in_eur"] = ts["rev_batt_feed_in_eur"].cumsum()
+    ts["cum_rev_pv_to_load_eur"] = ts["rev_pv_to_load_eur"].cumsum()
+    ts["cum_rev_batt_to_load_eur"] = ts["rev_batt_to_load_eur"].cumsum()
 
-def plot_load_selfconsumption_feedin_bess_charge(results: dict, start_date: str = "2024-07-01", n_days: int = 14):
-    T = len(results["load"])
-    time_idx, s, e = _date_window_indices(T, start_date, n_days)
-    if s >= e:
-        return
+    ts["cum_cost_charge_opportunity_eur"] = ts["cost_charge_opportunity_eur"].cumsum()
+    ts["cum_cost_storage_opex_eur"] = ts["cost_storage_opex_eur"].cumsum()
+    ts["cum_cost_meter_eur"] = ts["cost_meter_eur"].cumsum()
+    ts["cum_cost_pv_direct_marketing_eur"] = ts["cost_pv_direct_marketing_eur"].cumsum()
+    ts["cum_cost_battery_marketer_eur"] = ts["cost_battery_marketer_eur"].cumsum()
 
-    x = time_idx[s:e]
-    load = results["load"][s:e]
-    self_consumption = (results["pv_to_load"] + results["batt_to_load"])[s:e]
-    feed_in = (results["sell_pv"] + results["sell_batt"])[s:e]
-    bess_charge = results["ch"][s:e]
+    ts["cum_revenue_total_eur"] = (
+        ts["cum_rev_pv_feed_in_eur"]
+        + ts["cum_rev_batt_feed_in_eur"]
+        + ts["cum_rev_pv_to_load_eur"]
+        + ts["cum_rev_batt_to_load_eur"]
+    )
+    ts["cum_cost_total_eur"] = (
+        ts["cum_cost_charge_opportunity_eur"]
+        + ts["cum_cost_storage_opex_eur"]
+        + ts["cum_cost_meter_eur"]
+        + ts["cum_cost_pv_direct_marketing_eur"]
+        + ts["cum_cost_battery_marketer_eur"]
+    )
+    ts["cum_net_eur"] = ts["cum_revenue_total_eur"] - ts["cum_cost_total_eur"]
 
-    plt.figure(figsize=(16, 5))
-    plt.plot(x, load, linewidth=1.8, label="Last")
-    plt.plot(x, self_consumption, linewidth=1.8, label="Eigenverbrauch")
-    plt.plot(x, feed_in, linewidth=1.8, label="Einspeisung")
-    plt.plot(x, bess_charge, linewidth=1.8, label="Ladung BESS")
-    plt.title("Last, Eigenverbrauch, Einspeisung und BESS-Ladung")
-    plt.xlabel("Datum")
-    plt.ylabel("Energie [kWh/h]")
-    ax = plt.gca()
-    ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-    plt.grid(alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
+    timeseries_path = out_dir / "timeseries_export.csv"
+    ts.to_csv(timeseries_path, sep=";", decimal=",", index=False)
 
+    summary_rows = [
+        {"metric": k, "value": v}
+        for k, v in results.items()
+        if np.isscalar(v)
+    ]
+    summary_path = out_dir / "summary_export.csv"
+    pd.DataFrame(summary_rows).to_csv(summary_path, sep=";", decimal=",", index=False)
 
-def plot_battery_discharge_split(results: dict, start_date: str = "2024-07-01", n_days: int = 14):
-    T = len(results["sell_batt"])
-    time_idx, s, e = _date_window_indices(T, start_date, n_days)
-    if s >= e:
-        return
+    inputs_path = out_dir / "inputs_export.csv"
+    inp_dict = {k: str(v) if isinstance(v, Path) else v for k, v in inp.__dict__.items()}
+    pd.DataFrame(list(inp_dict.items()), columns=["parameter", "value"]).to_csv(
+        inputs_path, sep=";", decimal=",", index=False
+    )
 
-    x = time_idx[s:e]
-    batt_to_grid = results["sell_batt"][s:e]
-    batt_to_load = results["batt_to_load"][s:e]
-
-    total_to_grid = float(np.sum(results["sell_batt"]))
-    total_to_load = float(np.sum(results["batt_to_load"]))
-
-    fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=False)
-
-    axes[0].plot(x, batt_to_grid, linewidth=1.8, label="Speicher -> Netz")
-    axes[0].plot(x, batt_to_load, linewidth=1.8, label="Speicher -> Last")
-    axes[0].set_title("Aufteilung der Speicherentladung (Zeitverlauf)")
-    axes[0].set_xlabel("Datum")
-    axes[0].set_ylabel("Energie [kWh/h]")
-    axes[0].grid(alpha=0.3)
-    axes[0].legend()
-    axes[0].xaxis.set_major_locator(mdates.DayLocator(interval=2))
-    axes[0].xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-
-    axes[1].bar(["Speicher -> Netz", "Speicher -> Last"], [total_to_grid, total_to_load], alpha=0.85)
-    axes[1].set_title("Aufteilung der Speicherentladung (Jahressumme)")
-    axes[1].set_ylabel("Energie [kWh/a]")
-    axes[1].grid(axis="y", alpha=0.3)
-
-    plt.tight_layout()
-    plt.show()
+    return {
+        "timeseries": timeseries_path,
+        "summary": summary_path,
+        "inputs": inputs_path,
+    }
 
 
 def main():
@@ -677,11 +677,20 @@ def main():
     results = evaluate_results(model, prices, pv_per_kwp, load, inp)
     print_results(results, inp)
 
-    plot_soc(model, len(prices))
-    plot_avg_charge_discharge_by_hour(results["ch"], results["dis"])
-    plot_energy_balance(results, start_date="2024-07-01", n_days=14)
-    plot_load_selfconsumption_feedin_bess_charge(results, start_date="2024-07-01", n_days=14)
-    plot_battery_discharge_split(results, start_date="2024-07-01", n_days=14)
+    exports = export_results_and_timeseries(results, prices, inp)
+    print("\nExportierte Dateien:")
+    print(f"- Zeitreihen: {exports['timeseries']}")
+    print(f"- Summary:    {exports['summary']}")
+    print(f"- Inputs:     {exports['inputs']}")
+
+    from plotting_machine import run_all_plots
+
+    run_all_plots(
+        inp.export_dir,
+        start_date=inp.plot_start_date,
+        n_days=inp.plot_n_days,
+        template_docx=inp.template_word_path,
+    )
 
 
 if __name__ == "__main__":
