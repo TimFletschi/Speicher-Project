@@ -129,6 +129,52 @@ def load_timeseries(inp: "Inputs") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return prices_hour, pv_per_kwp_hour, load_hour
 
 
+def anzulegender_mischpreis_eur_per_kwh(pv_size_kwp: float) -> float:
+    """Gewichteter anzulegender Wert (EUR/kWh) nach Leistungsstufen.
+
+    Stufen (ct/kWh):
+    - bis 10 kW:   8.18
+    - bis 40 kW:   7.13
+    - bis 1000 kW: 5.90
+
+    Für Leistungen >1000 kW wird die letzte Stufe (5.90 ct/kWh) fortgeführt.
+    """
+    if pv_size_kwp <= 0:
+        raise ValueError("pv_size_kwp muss > 0 sein.")
+
+    # kW-Anteile je Stufe
+    s1 = min(pv_size_kwp, 10.0)
+    s2 = min(max(pv_size_kwp - 10.0, 0.0), 30.0)
+    s3 = max(pv_size_kwp - 40.0, 0.0)
+
+    # ct/kWh
+    w1 = 8.18
+    w2 = 7.13
+    w3 = 5.90
+
+    weighted_ct = (s1 * w1 + s2 * w2 + s3 * w3) / pv_size_kwp
+    return weighted_ct / 100.0
+
+
+def opportunity_price_eur_per_kwh(prices: np.ndarray, pv_size_kwp: float) -> np.ndarray:
+    """Opportunitätspreis für PV->Speicher-Ladung.
+
+    Logik:
+    - Spot <= 0: Opportunitätskosten = 0
+    - Anlagen >= 1000 kW und Spot > 0: fixer Opportunitätspreis 9.6 ct/kWh
+    - Sonst (Spot > 0): Opportunitätswert = max(Spot, anzulegender Mischpreis)
+    """
+    prices = np.asarray(prices, dtype=float)
+
+    if pv_size_kwp >= 1000.0:
+        # Ab 1000 kW: dauerhafter Preis 9.6 ct/kWh, außer wenn Spot <= 0 dann 0
+        return np.where(prices <= 0.0, 0.0, 0.096).astype(float)
+
+    mixed = anzulegender_mischpreis_eur_per_kwh(pv_size_kwp)
+    out = np.where(prices <= 0.0, 0.0, np.maximum(prices, mixed))
+    return out.astype(float)
+
+
 # =============================================================
 # 2) EINGABEN
 # =============================================================
@@ -139,7 +185,7 @@ class Inputs:
     path_bdew_g0: Path = Path(r"C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\G0Verbrauch_400.000kwh_stuendlich.csv")
 
     # PV-Größe in kWp eingeben
-    pv_size_kwp: float = 312
+    pv_size_kwp: float = 400
     # Größe der Anlage des Beispiel Erzeugungsprofils (z.B. 400 kWp), um die PV-Erzeugung pro kWp zu normieren.
     pv_reference_kwp: float = 400.0
     # Optional: standortspezifischer Jahresertrag zur Skalierung des PV-Profils.
@@ -147,7 +193,7 @@ class Inputs:
     pv_specific_yield_kwh_per_kwp_per_year: float | None = None
 
     # Verbrauch eingeben
-    annual_consumption_kwh: float = 232000
+    annual_consumption_kwh: float = 230000
     #Größe des Jahresverbrauchs des Beispiel Lastprofils (z.B. 400.000 kWh/a), um das Lastprofil zu normieren und auf den gewünschten Verbrauch hochzuskalieren.
     g0_reference_annual_kwh: float = 400000.0
 
@@ -163,7 +209,7 @@ class Inputs:
     # Getrennte Vergütung für Eigenverbrauch, in €/kWh
     pv_to_load_remuneration_eur_per_kwh: float = 0.14
     batt_to_load_remuneration_eur_per_kwh: float = 0.14
-    capex_batt_E_eur_per_kwh: float = 230.0
+    capex_batt_E_eur_per_kwh: float = 190.0
     # Laufende Kosten (veränderbar)
     storage_opex_pct_of_invest_per_year: float = 0.01
     meter_cost_eur_per_year: float = 300.0
@@ -209,13 +255,14 @@ def build_model(prices: np.ndarray, pv_per_kwp: np.ndarray, load: np.ndarray, in
     m.T = RangeSet(0, T - 1)
     neg_price = (prices < 0.0).astype(float)
     nonneg_price = (prices >= 0.0).astype(float)
+    opp_price = opportunity_price_eur_per_kwh(prices, inp.pv_size_kwp)
 
     pv_gen = pv_per_kwp * inp.pv_size_kwp
     pv_direct_to_load_baseline = np.minimum(pv_gen, load)
     pv_surplus_baseline = np.maximum(0.0, pv_gen - pv_direct_to_load_baseline)
     pv_direct_to_grid_baseline = np.where(prices >= 0.0, pv_surplus_baseline, 0.0)
     annual_value_only_pv_baseline = float(
-        np.sum(prices * pv_direct_to_grid_baseline)
+        np.sum(opp_price * pv_direct_to_grid_baseline)
         + inp.pv_to_load_remuneration_eur_per_kwh * np.sum(pv_direct_to_load_baseline)
     )
 
@@ -295,9 +342,9 @@ def build_model(prices: np.ndarray, pv_per_kwp: np.ndarray, load: np.ndarray, in
 
     def objective_rule(mm):
         degr_mult = capacity_degradation_multiplier(inp)
-        pv_feed_in_value = sum(prices[t] * mm.sell_pv[t] for t in mm.T)
+        pv_feed_in_value = sum(opp_price[t] * mm.sell_pv[t] for t in mm.T)
         batt_feed_in_value = sum(prices[t] * mm.sell_batt[t] for t in mm.T)
-        battery_charging_opportunity_cost = sum(prices[t] * mm.ch[t] for t in mm.T)
+        battery_charging_opportunity_cost = sum(opp_price[t] * mm.ch[t] for t in mm.T)
         pv_self_consumption_value = sum(
             inp.pv_to_load_remuneration_eur_per_kwh * mm.pv_to_load[t]
             for t in mm.T
@@ -318,7 +365,8 @@ def build_model(prices: np.ndarray, pv_per_kwp: np.ndarray, load: np.ndarray, in
         storage_invest = inp.capex_batt_E_eur_per_kwh * mm.E_max
         annual_storage_opex = inp.storage_opex_pct_of_invest_per_year * storage_invest
         annual_meter_cost = inp.meter_cost_eur_per_year
-        annual_pv_direct_marketing_cost = 12.0 * inp.pv_direct_marketing_cost_eur_per_month
+        # DV PV wird nicht der Batterie zugerechnet
+        annual_pv_direct_marketing_cost = 0.0
         annual_battery_marketer_cost = inp.marketer_share_of_battery_revenue * annual_battery_revenue
 
         annual_net_value = (
@@ -357,6 +405,7 @@ def evaluate_results(model: ConcreteModel, prices: np.ndarray, pv_per_kwp: np.nd
     effective_years_with_degradation = inp.horizon_years * degr_mult
 
     T = len(prices)
+    opp_price = opportunity_price_eur_per_kwh(prices, inp.pv_size_kwp)
     E_opt = value(model.E_max)
     P_opt = value(model.P_max)
 
@@ -366,13 +415,15 @@ def evaluate_results(model: ConcreteModel, prices: np.ndarray, pv_per_kwp: np.nd
     pv_direct_to_grid = np.where(prices >= 0.0, pv_surplus, 0.0)
 
     annual_value_only_pv = float(
-            np.sum(prices * pv_direct_to_grid)
-            + inp.pv_to_load_remuneration_eur_per_kwh * np.sum(pv_direct_to_load)
+        np.sum(opp_price * pv_direct_to_grid)
+        + inp.pv_to_load_remuneration_eur_per_kwh * np.sum(pv_direct_to_load)
     )
 
     annual_value_with_storage = float(
         sum(
-            prices[t] * (value(model.sell_pv[t]) + value(model.sell_batt[t]) - value(model.ch[t]))
+            opp_price[t] * value(model.sell_pv[t])
+            + prices[t] * value(model.sell_batt[t])
+            - opp_price[t] * value(model.ch[t])
             + inp.pv_to_load_remuneration_eur_per_kwh * value(model.pv_to_load[t])
             + inp.batt_to_load_remuneration_eur_per_kwh * value(model.batt_to_load[t])
             for t in range(T)
@@ -381,7 +432,8 @@ def evaluate_results(model: ConcreteModel, prices: np.ndarray, pv_per_kwp: np.nd
 
     annual_battery_revenue_eur = float(
         sum(
-            prices[t] * (value(model.sell_batt[t]) - value(model.ch[t]))
+            prices[t] * value(model.sell_batt[t])
+            - opp_price[t] * value(model.ch[t])
             + inp.batt_to_load_remuneration_eur_per_kwh * value(model.batt_to_load[t])
             for t in range(T)
         )
@@ -390,7 +442,8 @@ def evaluate_results(model: ConcreteModel, prices: np.ndarray, pv_per_kwp: np.nd
     storage_cost = inp.capex_batt_E_eur_per_kwh * E_opt
     annual_storage_opex_eur = inp.storage_opex_pct_of_invest_per_year * storage_cost
     annual_meter_cost_eur = inp.meter_cost_eur_per_year
-    annual_pv_direct_marketing_cost_eur = 12.0 * inp.pv_direct_marketing_cost_eur_per_month
+    # DV PV wird nicht der Batterie zugerechnet
+    annual_pv_direct_marketing_cost_eur = 0.0
     annual_battery_marketer_cost_eur = inp.marketer_share_of_battery_revenue * annual_battery_revenue_eur
     annual_fixed_costs_with_storage_eur = (
         annual_storage_opex_eur
@@ -565,6 +618,7 @@ def export_results_and_timeseries(results: dict, prices: np.ndarray, inp: Inputs
     out_dir.mkdir(parents=True, exist_ok=True)
 
     T = len(prices)
+    opp_price = opportunity_price_eur_per_kwh(prices, inp.pv_size_kwp)
     time_idx = pd.date_range("2024-01-01 00:00:00", periods=T, freq="1h")
 
     sell_pv = results["sell_pv"]
@@ -577,7 +631,7 @@ def export_results_and_timeseries(results: dict, prices: np.ndarray, inp: Inputs
     rev_batt_feed_in = prices * sell_batt
     rev_pv_to_load = inp.pv_to_load_remuneration_eur_per_kwh * pv_to_load
     rev_batt_to_load = inp.batt_to_load_remuneration_eur_per_kwh * batt_to_load
-    cost_charge_opportunity = prices * ch
+    cost_charge_opportunity = opp_price * ch
 
     cost_storage_opex = np.full(T, results["annual_storage_opex_eur"] / T)
     cost_meter = np.full(T, results["annual_meter_cost_eur"] / T)
@@ -590,6 +644,7 @@ def export_results_and_timeseries(results: dict, prices: np.ndarray, inp: Inputs
         {
             "timestamp": time_idx,
             "price_eur_per_kwh": prices,
+            "opportunity_price_eur_per_kwh": opp_price,
             "pv_gen_kwh": results["pv_gen"],
             "load_kwh": results["load"],
             "sell_pv_kwh": sell_pv,

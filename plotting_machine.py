@@ -229,10 +229,13 @@ def build_result_tables(ts: pd.DataFrame, summary: pd.DataFrame, inputs: pd.Data
         }
     )
 
+    cashflow_jaehrlich = build_yearly_cashflow_table(summary, inputs)
+
     return {
         "tabelle_projektdaten": projektdaten,
         "tabelle_erloese_kosten": revenue_cost,
         "tabelle_kennzahlen": key_metrics,
+        "tabelle_cashflow_jaehrlich": cashflow_jaehrlich,
     }
 
 
@@ -301,6 +304,55 @@ def _safe_get_float(df: pd.DataFrame, key_col: str, key: str, value_col: str, de
         return _get_float_from_table(df, key_col, key, value_col)
     except Exception:
         return default
+
+
+def build_yearly_cashflow_table(summary: pd.DataFrame, inputs: pd.DataFrame) -> pd.DataFrame:
+    """Erstellt eine Batterie-Jahres-Cashflow-Tabelle (Jahr 1..N) inkl. Degradation.
+
+    Wichtig: Nur Batterie-Perspektive.
+    - Keine PV-Erlöse (PV->Netz, PV->Last)
+    - Keine Kosten der PV-Direktvermarktung
+    """
+    horizon_years = int(_safe_get_float(inputs, "parameter", "horizon_years", "value", 15.0))
+    horizon_years = max(1, horizon_years)
+
+    annual_battery_revenue = _safe_get_float(summary, "metric", "annual_battery_revenue_eur", "value", 0.0)
+    annual_storage_opex = _safe_get_float(summary, "metric", "annual_storage_opex_eur", "value", 0.0)
+    annual_meter_cost = _safe_get_float(summary, "metric", "annual_meter_cost_eur", "value", 0.0)
+    annual_battery_marketer_cost = _safe_get_float(summary, "metric", "annual_battery_marketer_cost_eur", "value", 0.0)
+    storage_cost = _safe_get_float(summary, "metric", "storage_cost", "value", 0.0)
+    retention = _safe_get_float(summary, "metric", "batt_capacity_retention_after_horizon", "value", 1.0)
+
+    retention = min(1.0, max(0.0, retention))
+    if horizon_years == 1:
+        yearly_factor = np.array([retention])
+    else:
+        yearly_factor = np.linspace(1.0, retention, horizon_years)
+
+    years = np.arange(1, horizon_years + 1)
+    # Batterie-Erlöse skalieren mit Degradation
+    erlöse_batterie_jaehrlich = annual_battery_revenue * yearly_factor
+    # Kosten Batterie: OPEX + Zähler (fix) + Vermarkter Batterie (degradationsabhängig)
+    kosten_batterie_jaehrlich = (
+        annual_storage_opex
+        + annual_meter_cost
+        + annual_battery_marketer_cost * yearly_factor
+    )
+    netto_batterie_jaehrlich = erlöse_batterie_jaehrlich - kosten_batterie_jaehrlich
+    kum_netto_batterie = np.cumsum(netto_batterie_jaehrlich)
+    kum_netto_nach_capex = kum_netto_batterie - storage_cost
+
+    return pd.DataFrame(
+        {
+            "Jahr": years,
+            "Faktor_Degradation": yearly_factor,
+            "Batterie_Erloese_EUR": erlöse_batterie_jaehrlich,
+            "Batterie_Kosten_EUR": kosten_batterie_jaehrlich,
+            "Batterie_Netto_Jahr_EUR": netto_batterie_jaehrlich,
+            "Kumulierter_Batterie_Netto_EUR": kum_netto_batterie,
+            "Kumulierter_Netto_nach_CAPEX_EUR": kum_netto_nach_capex,
+        }
+    )
 
 
 def _add_report_cover(
@@ -372,6 +424,7 @@ def generate_pdf_report(export_dir: Path, start_date: str, n_days: int, template
         _add_report_cover(pdf, resolved_template, Path(export_dir), inputs, summary)
         _add_df_table_page(pdf, "Projekt- und Anlagenparameter", tables["tabelle_projektdaten"])
         _add_df_table_page(pdf, "Kennzahlen", tables["tabelle_kennzahlen"])
+        _add_df_table_page(pdf, "Cashflow Jahr 1 bis Jahr N", tables["tabelle_cashflow_jaehrlich"])
         _add_df_table_page(pdf, "Erlöse und Kosten", tables["tabelle_erloese_kosten"])
 
         # Diagrammseiten (alle relevanten Diagramme explizit anhängen)
@@ -380,6 +433,22 @@ def generate_pdf_report(export_dir: Path, start_date: str, n_days: int, template
         plt.close(fig)
 
         fig = plot_avg_charge_discharge_by_hour(ts, show=False)
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
+        fig = plot_avg_spot_price_by_hour(ts, show=False)
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
+        fig = plot_batt_feed_in_price_summer_2weeks(ts, start_date=start_date, n_days=n_days, show=False)
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
+        fig = plot_batt_feed_in_price_summer_2weeks(ts, start_date="2024-02-01", n_days=14, show=False)
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
+        fig = plot_average_battery_prices_over_horizon(ts, show=False)
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 
@@ -403,9 +472,14 @@ def generate_pdf_report(export_dir: Path, start_date: str, n_days: int, template
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 
-        fig = plot_cumulative_revenues_and_costs(ts, summary, inputs, show=False)
+        fig = plot_objective_cashflow_over_horizon(summary, inputs, show=False)
         pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
+
+        fig = plot_discounted_cashflow_over_horizon(summary, inputs, discount_rate=0.06, show=False)
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
+
 
     report_path = resolve_report_path(Path(export_dir), resolved_template)
     try:
@@ -449,15 +523,195 @@ def plot_avg_charge_discharge_by_hour(ts: pd.DataFrame, show: bool = True):
     tmp["hour"] = tmp["timestamp"].dt.hour
     grp = tmp.groupby("hour", as_index=False)[["ch_kwh", "dis_kwh"]].mean()
 
+    # Gemittelte Preise je Tagesstunde (energiemengengewichtet)
+    # Hinweis: Verkaufspreis nur für BATT -> Netz (nicht BATT -> Last)
+    avg_sell_price = []
+    avg_charge_price = []
+    for h in range(24):
+        hh = tmp[tmp["hour"] == h]
+
+        sell_grid_weight = float(hh["sell_batt_kwh"].sum())
+        if sell_grid_weight > 0:
+            # Mengengewichteter Auspeicherpreis ins Netz:
+            # (BATT->Netz Erlös) / (BATT->Netz Energiemenge)
+            p_sell = float(hh["rev_batt_feed_in_eur"].sum() / sell_grid_weight)
+        else:
+            p_sell = np.nan
+
+        ch_weight = float(hh["ch_kwh"].sum())
+        if ch_weight > 0:
+            # Mengengewichteter Einspeicherpreis:
+            # Opportunitätskosten Laden / Ladeenergie
+            p_charge = float(hh["cost_charge_opportunity_eur"].sum() / ch_weight)
+        else:
+            p_charge = np.nan
+
+        avg_sell_price.append(p_sell)
+        avg_charge_price.append(p_charge)
+
+    grp["avg_sell_price_eur_per_kwh"] = avg_sell_price
+    grp["avg_charge_price_eur_per_kwh"] = avg_charge_price
+
     fig = plt.figure(figsize=(12, 5))
-    plt.plot(grp["hour"], grp["ch_kwh"], marker="o", linewidth=2, label="Laden")
-    plt.plot(grp["hour"], grp["dis_kwh"], marker="o", linewidth=2, label="Entladen")
+    ax1 = plt.gca()
+    ax1.plot(grp["hour"], grp["ch_kwh"], marker="o", linewidth=2, label="Laden")
+    ax1.plot(grp["hour"], grp["dis_kwh"], marker="o", linewidth=2, label="Entladen")
+    ax1.set_xticks(np.arange(24))
+    ax1.set_xlabel("Stunde des Tages")
+    ax1.set_ylabel("Energie [kWh pro Stunde]")
+    ax1.grid(alpha=0.3)
+
+    ax2 = ax1.twinx()
+    ax2.plot(
+        grp["hour"],
+        grp["avg_sell_price_eur_per_kwh"],
+        marker="s",
+        linewidth=1.8,
+        linestyle="--",
+        label="Ø Auspeicherpreis ins Netz",
+    )
+    ax2.plot(
+        grp["hour"],
+        grp["avg_charge_price_eur_per_kwh"],
+        marker="^",
+        linewidth=1.8,
+        linestyle=":",
+        label="Ø Einspeicherpreis (bei Ladung)",
+    )
+    ax2.set_ylabel("Preis [EUR/kWh]")
+
+    h1, l1 = ax1.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax1.legend(h1 + h2, l1 + l2, loc="best")
+    plt.title("Gemittelte Lade-/Entladezeiten inkl. gemittelter Netz-Auspeicher- und Einspeicherpreise")
+    plt.tight_layout()
+    if show:
+        plt.show()
+    return fig
+
+
+def plot_avg_spot_price_by_hour(ts: pd.DataFrame, show: bool = True):
+    """Plottet den über alle Tage gemittelten Spotmarktpreis je Tagesstunde."""
+    tmp = ts.copy()
+    tmp["hour"] = tmp["timestamp"].dt.hour
+    grp = tmp.groupby("hour", as_index=False)["price_eur_per_kwh"].mean()
+
+    fig = plt.figure(figsize=(12, 4.8))
+    plt.plot(grp["hour"], grp["price_eur_per_kwh"], marker="o", linewidth=2.0, label="Ø Spotmarktpreis")
+    plt.axhline(0.0, color=GRAY_5, linewidth=1.0, linestyle="--")
     plt.xticks(np.arange(24))
     plt.xlabel("Stunde des Tages")
-    plt.ylabel("Energie [kWh pro Stunde]")
-    plt.title("Gemittelte Lade-/Entladezeiten pro Tag")
+    plt.ylabel("Preis [EUR/kWh]")
+    plt.title("Über den Tag gemittelter Spotmarktpreis je Stunde")
     plt.grid(alpha=0.3)
-    plt.legend()
+    plt.legend(loc="best")
+    plt.tight_layout()
+    if show:
+        plt.show()
+    return fig
+
+
+def plot_batt_feed_in_price_summer_2weeks(
+    ts: pd.DataFrame,
+    start_date: str = "2024-07-01",
+    n_days: int = 14,
+    show: bool = True,
+):
+    """Plottet Spotpreis und BATT->Netz-Auspeicherpreis für ein Sommer-2-Wochen-Fenster."""
+    w = _window(ts, start_date, n_days)
+
+    # Nur Stunden mit Batterieeinspeisung ins Netz
+    w_sell = w[w["sell_batt_kwh"] > 0].copy()
+
+    # Mengengewichteter Auspeicherpreis im Fenster (nur BATT -> Netz)
+    sell_kwh_window = float(w_sell["sell_batt_kwh"].sum())
+    avg_out_price_window = float(w_sell["rev_batt_feed_in_eur"].sum() / sell_kwh_window) if sell_kwh_window > 0 else np.nan
+
+    # Jahreswert zum Vergleich
+    sell_kwh_year = float(ts["sell_batt_kwh"].sum())
+    avg_out_price_year = float(ts["rev_batt_feed_in_eur"].sum() / sell_kwh_year) if sell_kwh_year > 0 else np.nan
+
+    fig, ax = plt.subplots(figsize=(16, 5.5))
+    ax.plot(w["timestamp"], w["price_eur_per_kwh"], linewidth=1.2, alpha=0.7, label="Spotmarktpreis (alle Stunden)")
+
+    if len(w_sell) > 0:
+        sc = ax.scatter(
+            w_sell["timestamp"],
+            w_sell["price_eur_per_kwh"],
+            c=w_sell["sell_batt_kwh"],
+            cmap="Greens",
+            s=30,
+            alpha=0.9,
+            label="Stunden mit BATT -> Netz (Farbe = kWh)",
+        )
+        cbar = plt.colorbar(sc, ax=ax, pad=0.01)
+        cbar.set_label("BATT -> Netz [kWh]")
+
+    if np.isfinite(avg_out_price_window):
+        ax.axhline(
+            avg_out_price_window,
+            color=GRAY_5,
+            linestyle="--",
+            linewidth=1.5,
+            label=f"Ø Auspeicherpreis Fenster: {avg_out_price_window:.3f} EUR/kWh",
+        )
+    if np.isfinite(avg_out_price_year):
+        ax.axhline(
+            avg_out_price_year,
+            color=GRAY_3,
+            linestyle=":",
+            linewidth=1.5,
+            label=f"Ø Auspeicherpreis Jahr: {avg_out_price_year:.3f} EUR/kWh",
+        )
+
+    ax.set_title(f"Ausspeicherpreise (BATT -> Netz): {n_days} Tage ab {start_date}")
+    ax.set_xlabel("Datum")
+    ax.set_ylabel("Preis [EUR/kWh]")
+    ax.grid(alpha=0.3)
+    ax.legend(loc="best")
+    ax.xaxis.set_major_locator(mdates.DayLocator(interval=2))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
+
+    plt.tight_layout()
+    if show:
+        plt.show()
+    return fig
+
+
+def plot_average_battery_prices_over_horizon(ts: pd.DataFrame, show: bool = True):
+    """Mittlere Batterie-Preise über die gesamte Laufzeit."""
+    w_dis = float(ts["dis_kwh"].sum())
+    avg_price_batt_sell_total = float(
+        (ts["rev_batt_feed_in_eur"] + ts["rev_batt_to_load_eur"]).sum() / w_dis
+    ) if w_dis > 0 else np.nan
+
+    w_grid = float(ts["sell_batt_kwh"].sum())
+    avg_price_batt_to_grid = float(ts["rev_batt_feed_in_eur"].sum() / w_grid) if w_grid > 0 else np.nan
+
+    w_load = float(ts["batt_to_load_kwh"].sum())
+    avg_price_batt_to_load = float(ts["rev_batt_to_load_eur"].sum() / w_load) if w_load > 0 else np.nan
+
+    w_charge = float(ts["ch_kwh"].sum())
+    avg_charge_price = float(ts["cost_charge_opportunity_eur"].sum() / w_charge) if w_charge > 0 else np.nan
+
+    labels = [
+        "Ø Verkaufspreis gesamt\n(BATT-Entladung)",
+        "Ø Verkaufspreis\nBatterie -> Netz",
+        "Ø Verkaufspreis\nBatterie -> Last",
+        "Ø Einspeicherpreis\n(Batterie-Ladung)",
+    ]
+    values = [avg_price_batt_sell_total, avg_price_batt_to_grid, avg_price_batt_to_load, avg_charge_price]
+
+    fig = plt.figure(figsize=(10, 5))
+    bars = plt.bar(labels, values, alpha=0.85)
+    plt.ylabel("Preis [EUR/kWh]")
+    plt.title("Gemittelte Batterie-Preise über die Laufzeit")
+    plt.grid(axis="y", alpha=0.3)
+
+    for b, v in zip(bars, values):
+        if np.isfinite(v):
+            plt.text(b.get_x() + b.get_width() / 2.0, v, f"{v:.3f}", ha="center", va="bottom", fontsize=9)
+
     plt.tight_layout()
     if show:
         plt.show()
@@ -727,6 +981,106 @@ def plot_revenue_cost_comparison_bars(ts: pd.DataFrame, summary: pd.DataFrame, i
     return fig
 
 
+def plot_objective_cashflow_over_horizon(summary: pd.DataFrame, inputs: pd.DataFrame, show: bool = True):
+    """Zeigt Batterie-Jahres-Cashflows und Netto-Entwicklung über Jahr 1..N."""
+    cf = build_yearly_cashflow_table(summary, inputs)
+
+    years = cf["Jahr"].to_numpy()
+    yearly_revenue = cf["Batterie_Erloese_EUR"].to_numpy()
+    yearly_cost = cf["Batterie_Kosten_EUR"].to_numpy()
+    yearly_delta = cf["Batterie_Netto_Jahr_EUR"].to_numpy()
+    cum_net = cf["Kumulierter_Netto_nach_CAPEX_EUR"].to_numpy()
+
+    fig, ax1 = plt.subplots(figsize=(14, 6))
+    width = 0.28
+    bars_revenue = ax1.bar(years - width, yearly_revenue, width=width, label="Batterie-Erlöse/Jahr")
+    bars_cost = ax1.bar(years, -yearly_cost, width=width, label="Batterie-Kosten/Jahr")
+    bars_net = ax1.bar(years + width, yearly_delta, width=width, label="Batterie-Netto/Jahr")
+
+    for bars in (bars_revenue, bars_cost, bars_net):
+        for b in bars:
+            v = b.get_height()
+            ax1.text(
+                b.get_x() + b.get_width() / 2.0,
+                v,
+                f"{v:,.0f}",
+                ha="center",
+                va="bottom" if v >= 0 else "top",
+                fontsize=8,
+            )
+    ax1.axhline(0.0, color=GRAY_5, linewidth=1.0)
+    ax1.set_xlabel("Jahr")
+    ax1.set_ylabel("EUR pro Jahr")
+    ax1.set_xticks(years)
+    ax1.grid(axis="y", alpha=0.3)
+
+    ax2 = ax1.twinx()
+    ax2.plot(years, cum_net, linewidth=2.4, marker="o", label="Kumuliert: Batterie-Netto nach CAPEX")
+    ax2.set_ylabel("Kumuliert EUR")
+
+    h1, l1 = ax1.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax1.legend(h1 + h2, l1 + l2, loc="best")
+
+    plt.title("Jährliche Batterie-Cashflows Jahr 1 bis Jahr N")
+    plt.tight_layout()
+
+    if show:
+        plt.show()
+    return fig
+
+
+def plot_discounted_cashflow_over_horizon(
+    summary: pd.DataFrame,
+    inputs: pd.DataFrame,
+    discount_rate: float = 0.06,
+    show: bool = True,
+):
+    """Zeigt abgezinste Batterie-Cashflows (NPV) über Jahr 1..N bei gegebener Diskontierung."""
+    cf = build_yearly_cashflow_table(summary, inputs)
+    storage_cost = _safe_get_float(summary, "metric", "storage_cost", "value", 0.0)
+
+    years = cf["Jahr"].to_numpy(dtype=float)
+    yearly_net = cf["Batterie_Netto_Jahr_EUR"].to_numpy(dtype=float)
+    discount_factors = (1.0 + float(discount_rate)) ** years
+    discounted_yearly_net = yearly_net / discount_factors
+    cumulative_npv = -storage_cost + np.cumsum(discounted_yearly_net)
+
+    fig, ax1 = plt.subplots(figsize=(14, 6))
+    bars = ax1.bar(years, discounted_yearly_net, width=0.65, alpha=0.85, label="Abgezinster Netto-Cashflow/Jahr")
+    ax1.axhline(0.0, color=GRAY_5, linewidth=1.0)
+    ax1.set_xlabel("Jahr")
+    ax1.set_ylabel("Abgezinster Cashflow [EUR]")
+    ax1.set_xticks(years)
+    ax1.grid(axis="y", alpha=0.3)
+
+    for b in bars:
+        v = b.get_height()
+        ax1.text(
+            b.get_x() + b.get_width() / 2.0,
+            v,
+            f"{v:,.0f}",
+            ha="center",
+            va="bottom" if v >= 0 else "top",
+            fontsize=8,
+        )
+
+    ax2 = ax1.twinx()
+    ax2.plot(years, cumulative_npv, linewidth=2.4, marker="o", label="Kumulierter NPV (inkl. CAPEX t0)")
+    ax2.set_ylabel("NPV [EUR]")
+
+    h1, l1 = ax1.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax1.legend(h1 + h2, l1 + l2, loc="best")
+
+    plt.title(f"Batterie-Cashflow mit {discount_rate*100:.1f}% Diskontierung (IRR-Hürde)")
+    plt.tight_layout()
+
+    if show:
+        plt.show()
+    return fig
+
+
 def run_all_plots(
     export_dir: Path,
     start_date: str = "2024-07-01",
@@ -739,12 +1093,17 @@ def run_all_plots(
 
     plot_soc(ts, start_date=start_date, n_days=n_days)
     plot_avg_charge_discharge_by_hour(ts)
+    plot_avg_spot_price_by_hour(ts)
+    plot_batt_feed_in_price_summer_2weeks(ts, start_date=start_date, n_days=n_days)
+    plot_batt_feed_in_price_summer_2weeks(ts, start_date="2024-02-01", n_days=14)
+    plot_average_battery_prices_over_horizon(ts)
     plot_energy_balance(ts, start_date=start_date, n_days=n_days)
     plot_load_selfconsumption_feedin_bess_charge(ts, start_date=start_date, n_days=n_days)
     plot_battery_discharge_split(ts, start_date=start_date, n_days=n_days)
     plot_bess_revenue_costs_2weeks(ts, start_date=start_date, n_days=n_days)
     plot_revenue_cost_comparison_bars(ts, summary, inputs)
-    plot_cumulative_revenues_and_costs(ts, summary, inputs)
+    plot_objective_cashflow_over_horizon(summary, inputs)
+    plot_discounted_cashflow_over_horizon(summary, inputs, discount_rate=0.06)
 
     generate_pdf_report(export_dir, start_date=start_date, n_days=n_days, template_docx=template_docx)
 

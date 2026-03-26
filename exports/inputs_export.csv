@@ -2,10 +2,10 @@ parameter;value
 path_prices;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\Spotmarktpreis.csv
 path_pv;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\PV-Daten_400kwp_stuendlich.csv
 path_bdew_g0;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\G0Verbrauch_400.000kwh_stuendlich.csv
-pv_size_kwp;312
+pv_size_kwp;400
 pv_reference_kwp;400.0
 pv_specific_yield_kwh_per_kwp_per_year;
-annual_consumption_kwh;232000
+annual_consumption_kwh;230000
 g0_reference_annual_kwh;400000.0
 eta_ch;0.95
 eta_dis;0.95
@@ -14,7 +14,7 @@ batt_capacity_retention_after_horizon;0.8
 price_in_ct_per_kwh;True
 pv_to_load_remuneration_eur_per_kwh;0.14
 batt_to_load_remuneration_eur_per_kwh;0.14
-capex_batt_E_eur_per_kwh;230.0
+capex_batt_E_eur_per_kwh;190.0
 storage_opex_pct_of_invest_per_year;0.01
 meter_cost_eur_per_year;300.0
 marketer_share_of_battery_revenue;0.1
