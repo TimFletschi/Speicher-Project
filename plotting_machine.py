@@ -1086,24 +1086,63 @@ def run_all_plots(
     start_date: str = "2024-07-01",
     n_days: int = 14,
     template_docx: Path | None = None,
+    show_plots: bool = False,
 ):
     ts, summary, inputs = load_exported_data(Path(export_dir))
     tables = build_result_tables(ts, summary, inputs)
     show_and_export_tables(export_dir, tables)
 
-    plot_soc(ts, start_date=start_date, n_days=n_days)
-    plot_avg_charge_discharge_by_hour(ts)
-    plot_avg_spot_price_by_hour(ts)
-    plot_batt_feed_in_price_summer_2weeks(ts, start_date=start_date, n_days=n_days)
-    plot_batt_feed_in_price_summer_2weeks(ts, start_date="2024-02-01", n_days=14)
-    plot_average_battery_prices_over_horizon(ts)
-    plot_energy_balance(ts, start_date=start_date, n_days=n_days)
-    plot_load_selfconsumption_feedin_bess_charge(ts, start_date=start_date, n_days=n_days)
-    plot_battery_discharge_split(ts, start_date=start_date, n_days=n_days)
-    plot_bess_revenue_costs_2weeks(ts, start_date=start_date, n_days=n_days)
-    plot_revenue_cost_comparison_bars(ts, summary, inputs)
-    plot_objective_cashflow_over_horizon(summary, inputs)
-    plot_discounted_cashflow_over_horizon(summary, inputs, discount_rate=0.06)
+    fig = plot_soc(ts, start_date=start_date, n_days=n_days, show=show_plots)
+    if not show_plots:
+        plt.close(fig)
+
+    fig = plot_avg_charge_discharge_by_hour(ts, show=show_plots)
+    if not show_plots:
+        plt.close(fig)
+
+    fig = plot_avg_spot_price_by_hour(ts, show=show_plots)
+    if not show_plots:
+        plt.close(fig)
+
+    fig = plot_batt_feed_in_price_summer_2weeks(ts, start_date=start_date, n_days=n_days, show=show_plots)
+    if not show_plots:
+        plt.close(fig)
+
+    fig = plot_batt_feed_in_price_summer_2weeks(ts, start_date="2024-02-01", n_days=14, show=show_plots)
+    if not show_plots:
+        plt.close(fig)
+
+    fig = plot_average_battery_prices_over_horizon(ts, show=show_plots)
+    if not show_plots:
+        plt.close(fig)
+
+    fig = plot_energy_balance(ts, start_date=start_date, n_days=n_days, show=show_plots)
+    if not show_plots:
+        plt.close(fig)
+
+    fig = plot_load_selfconsumption_feedin_bess_charge(ts, start_date=start_date, n_days=n_days, show=show_plots)
+    if not show_plots:
+        plt.close(fig)
+
+    fig = plot_battery_discharge_split(ts, start_date=start_date, n_days=n_days, show=show_plots)
+    if not show_plots:
+        plt.close(fig)
+
+    fig = plot_bess_revenue_costs_2weeks(ts, start_date=start_date, n_days=n_days, show=show_plots)
+    if not show_plots:
+        plt.close(fig)
+
+    fig = plot_revenue_cost_comparison_bars(ts, summary, inputs, show=show_plots)
+    if not show_plots:
+        plt.close(fig)
+
+    fig = plot_objective_cashflow_over_horizon(summary, inputs, show=show_plots)
+    if not show_plots:
+        plt.close(fig)
+
+    fig = plot_discounted_cashflow_over_horizon(summary, inputs, discount_rate=0.06, show=show_plots)
+    if not show_plots:
+        plt.close(fig)
 
     generate_pdf_report(export_dir, start_date=start_date, n_days=n_days, template_docx=template_docx)
 
@@ -1119,9 +1158,16 @@ def main():
     parser.add_argument("--start-date", type=str, default="2024-07-01", help="Startdatum für 14-Tage-Fenster")
     parser.add_argument("--n-days", type=int, default=14, help="Anzahl Tage im Fenster")
     parser.add_argument("--template-docx", type=Path, default=None, help="Optionales Word-Muster (Infohinweis)")
+    parser.add_argument("--show-plots", action="store_true", help="Diagramme interaktiv anzeigen (sonst nur erzeugen/speichern)")
     args = parser.parse_args()
 
-    run_all_plots(args.export_dir, start_date=args.start_date, n_days=args.n_days, template_docx=args.template_docx)
+    run_all_plots(
+        args.export_dir,
+        start_date=args.start_date,
+        n_days=args.n_days,
+        template_docx=args.template_docx,
+        show_plots=args.show_plots,
+    )
 
 
 if __name__ == "__main__":

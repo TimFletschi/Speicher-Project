@@ -1,7 +1,8 @@
 parameter;value
-path_prices;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\Spotmarktpreis.csv
-path_pv;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\PV-Daten_400kwp_stuendlich.csv
-path_bdew_g0;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\G0Verbrauch_400.000kwh_stuendlich.csv
+_BASE_DIR;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation
+path_prices;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\Data\Spotmarktpreis.csv
+path_pv;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\Data\PV-Daten_400kwp_stuendlich.csv
+path_bdew_g0;C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\Data\G0Verbrauch_400.000kwh_stuendlich.csv
 pv_size_kwp;400
 pv_reference_kwp;400.0
 pv_specific_yield_kwh_per_kwp_per_year;

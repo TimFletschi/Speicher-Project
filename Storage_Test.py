@@ -237,6 +237,7 @@ class Inputs:
     template_word_path: Path | None = _BASE_DIR / "PDF" / "VORLAGE_Ausführungsbeschreibung_PVA_Kunde1.docx"
     plot_start_date: str = "2024-07-01"
     plot_n_days: int = 14
+    plot_show_interactive: bool = False
 
 
 # =============================================================
@@ -751,6 +752,7 @@ def main():
         start_date=inp.plot_start_date,
         n_days=inp.plot_n_days,
         template_docx=inp.template_word_path,
+        show_plots=inp.plot_show_interactive,
     )
 
 
