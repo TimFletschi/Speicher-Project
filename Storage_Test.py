@@ -109,19 +109,24 @@ def load_pv_per_kwp_hourly(
 
 
 def load_timeseries(inp: "Inputs") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    df_price = pd.read_csv(inp.path_prices, sep=";", decimal=",")
+    base_dir = Path(__file__).resolve().parent
+    path_prices = inp.path_prices if inp.path_prices.exists() else base_dir / inp.path_prices.name
+    path_pv = inp.path_pv if inp.path_pv.exists() else base_dir / inp.path_pv.name
+    path_bdew = inp.path_bdew_g0 if inp.path_bdew_g0.exists() else base_dir / inp.path_bdew_g0.name
+
+    df_price = pd.read_csv(path_prices, sep=";", decimal=",")
     prices_hour = pd.to_numeric(df_price["price"], errors="coerce").fillna(0.0).values
     if inp.price_in_ct_per_kwh:
         prices_hour = prices_hour / 100.0
 
     pv_per_kwp_hour = load_pv_per_kwp_hourly(
-        inp.path_pv,
+        path_pv,
         len(prices_hour),
         inp.pv_reference_kwp,
         inp.pv_specific_yield_kwh_per_kwp_per_year,
     )
     load_hour = load_bdew_g0_profile_15min(
-        inp.path_bdew_g0,
+        path_bdew,
         len(prices_hour),
         inp.annual_consumption_kwh,
         inp.g0_reference_annual_kwh,
@@ -180,9 +185,10 @@ def opportunity_price_eur_per_kwh(prices: np.ndarray, pv_size_kwp: float) -> np.
 # =============================================================
 @dataclass
 class Inputs:
-    path_prices: Path = Path(r"C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\Spotmarktpreis.csv")
-    path_pv: Path = Path(r"C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\PV-Daten_400kwp_stuendlich.csv")
-    path_bdew_g0: Path = Path(r"C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\G0Verbrauch_400.000kwh_stuendlich.csv")
+    _BASE_DIR: Path = Path(__file__).resolve().parent
+    path_prices: Path = _BASE_DIR / "Data" / "Spotmarktpreis.csv"
+    path_pv: Path = _BASE_DIR / "Data" / "PV-Daten_400kwp_stuendlich.csv"
+    path_bdew_g0: Path = _BASE_DIR / "Data" / "G0Verbrauch_400.000kwh_stuendlich.csv"
 
     # PV-Größe in kWp eingeben
     pv_size_kwp: float = 400
@@ -227,8 +233,8 @@ class Inputs:
     cbc_time_limit_sec: int = 300
     cbc_mip_gap: float = 0.01
     cbc_threads: int = 0
-    export_dir: Path = Path(r"C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\exports")
-    template_word_path: Path | None = Path(r"C:\Users\TimFletschinger\OneDrive - empact GmbH\Desktop\04 Simulation\PDF\VORLAGE_Ausführungsbeschreibung_PVA_Kunde1.docx")
+    export_dir: Path = _BASE_DIR / "exports"
+    template_word_path: Path | None = _BASE_DIR / "PDF" / "VORLAGE_Ausführungsbeschreibung_PVA_Kunde1.docx"
     plot_start_date: str = "2024-07-01"
     plot_n_days: int = 14
 

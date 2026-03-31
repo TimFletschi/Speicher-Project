@@ -34,7 +34,7 @@ class InputsNPV(BaseInputs):
     # Diskontsatz (Hurdle Rate), z. B. 6%
     discount_rate: float = 0.06
     # Baukosten Speicher (CAPEX) explizit im NPV-Tool setzbar
-    capex_batt_E_eur_per_kwh: float = 180.0
+    capex_batt_E_eur_per_kwh: float = 120.0
     # Standardverbrauch für dieses NPV-Tool
     annual_consumption_kwh: float = 400000.0
 
