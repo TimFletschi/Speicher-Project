@@ -239,14 +239,19 @@ def build_result_tables(ts: pd.DataFrame, summary: pd.DataFrame, inputs: pd.Data
     }
 
 
-def show_and_export_tables(export_dir: Path, tables: dict[str, pd.DataFrame]):
+def show_and_export_tables(export_dir: Path, tables: dict[str, pd.DataFrame], print_to_console: bool = True):
     """Zeigt Tabellen im Terminal und schreibt sie als CSV in report_tables/."""
     table_dir = Path(export_dir) / "report_tables"
     table_dir.mkdir(parents=True, exist_ok=True)
     for name, df in tables.items():
-        print(f"\n=== {name} ===")
-        print(df.to_string(index=False))
-        df.to_csv(table_dir / f"{name}.csv", sep=";", decimal=",", index=False)
+        df_export = df.copy()
+        num_cols = df_export.select_dtypes(include=[np.number]).columns
+        if len(num_cols) > 0:
+            df_export[num_cols] = df_export[num_cols].round(2)
+        if print_to_console:
+            print(f"\n=== {name} ===")
+            print(df_export.to_string(index=False))
+        df_export.to_csv(table_dir / f"{name}.csv", sep=";", decimal=",", index=False)
 
 
 def _add_df_table_page(pdf: PdfPages, title: str, df: pd.DataFrame):
@@ -413,16 +418,25 @@ def _add_report_cover(
     plt.close(fig)
 
 
-def generate_pdf_report(export_dir: Path, start_date: str, n_days: int, template_docx: Path | None = None):
+def generate_pdf_report(
+    export_dir: Path,
+    start_date: str,
+    n_days: int,
+    template_docx: Path | None = None,
+    include_project_data_table: bool = True,
+):
     """Erzeugt vollständigen PDF-Bericht mit Tabellen und sämtlichen Diagrammen."""
     ts, summary, inputs = load_exported_data(Path(export_dir))
     tables = build_result_tables(ts, summary, inputs)
+    if not include_project_data_table:
+        tables.pop("tabelle_projektdaten", None)
     resolved_template = resolve_template_path(Path(export_dir), template_docx)
     _apply_template_style_if_available(resolved_template)
 
     def _write_report_pages(pdf: PdfPages):
         _add_report_cover(pdf, resolved_template, Path(export_dir), inputs, summary)
-        _add_df_table_page(pdf, "Projekt- und Anlagenparameter", tables["tabelle_projektdaten"])
+        if "tabelle_projektdaten" in tables:
+            _add_df_table_page(pdf, "Projekt- und Anlagenparameter", tables["tabelle_projektdaten"])
         _add_df_table_page(pdf, "Kennzahlen", tables["tabelle_kennzahlen"])
         _add_df_table_page(pdf, "Cashflow Jahr 1 bis Jahr N", tables["tabelle_cashflow_jaehrlich"])
         _add_df_table_page(pdf, "Erlöse und Kosten", tables["tabelle_erloese_kosten"])
@@ -1087,10 +1101,14 @@ def run_all_plots(
     n_days: int = 14,
     template_docx: Path | None = None,
     show_plots: bool = False,
+    print_tables: bool = True,
+    include_project_data_table: bool = True,
 ):
     ts, summary, inputs = load_exported_data(Path(export_dir))
     tables = build_result_tables(ts, summary, inputs)
-    show_and_export_tables(export_dir, tables)
+    if not include_project_data_table:
+        tables.pop("tabelle_projektdaten", None)
+    show_and_export_tables(export_dir, tables, print_to_console=print_tables)
 
     fig = plot_soc(ts, start_date=start_date, n_days=n_days, show=show_plots)
     if not show_plots:
@@ -1144,7 +1162,13 @@ def run_all_plots(
     if not show_plots:
         plt.close(fig)
 
-    generate_pdf_report(export_dir, start_date=start_date, n_days=n_days, template_docx=template_docx)
+    generate_pdf_report(
+        export_dir,
+        start_date=start_date,
+        n_days=n_days,
+        template_docx=template_docx,
+        include_project_data_table=include_project_data_table,
+    )
 
 
 def main():

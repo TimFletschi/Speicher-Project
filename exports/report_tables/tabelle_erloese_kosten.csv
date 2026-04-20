@@ -1,11 +1,11 @@
 Kategorie;EUR_pro_Jahr
-Erlös PV->Netz;12648,280137768887
-Erlös BATT->Netz;437,9533341809599
-Erlös PV->Last;16405,352312902
-Erlös BATT->Last;112,56017936555003
-Kosten Opp. Laden;-75,66329435689784
-Kosten OPEX;-41,48134529999949
-Kosten Zähler;-299,99999999999955
+Erlös PV->Netz;6756,37
+Erlös BATT->Netz;2917,83
+Erlös PV->Last;14710,83
+Erlös BATT->Last;6632,02
+Kosten Opp. Laden;-2013,16
+Kosten OPEX;-539,0
+Kosten Zähler;-300,0
 Kosten DV PV;-0,0
-Kosten Vermarkter BATT;-47,48502191896121
-Kosten CAPEX/Jahr;-276,542302
+Kosten Vermarkter BATT;-753,67
+Kosten CAPEX/Jahr;-3593,33

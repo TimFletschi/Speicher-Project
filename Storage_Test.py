@@ -191,12 +191,12 @@ class Inputs:
     path_bdew_g0: Path = _BASE_DIR / "Data" / "G0Verbrauch_400.000kwh_stuendlich.csv"
 
     # PV-Größe in kWp eingeben
-    pv_size_kwp: float = 400
+    pv_size_kwp: float = 312
     # Größe der Anlage des Beispiel Erzeugungsprofils (z.B. 400 kWp), um die PV-Erzeugung pro kWp zu normieren.
     pv_reference_kwp: float = 400.0
     # Optional: standortspezifischer Jahresertrag zur Skalierung des PV-Profils.
     # Beispiel: 950.0 oder 1100.0 kWh/kWp*a. None = Wert aus CSV unverändert nutzen.
-    pv_specific_yield_kwh_per_kwp_per_year: float | None = None
+    pv_specific_yield_kwh_per_kwp_per_year: float | None = 919
 
     # Verbrauch eingeben
     annual_consumption_kwh: float = 230000
@@ -214,13 +214,15 @@ class Inputs:
     price_in_ct_per_kwh: bool = True
     # Getrennte Vergütung für Eigenverbrauch, in €/kWh
     pv_to_load_remuneration_eur_per_kwh: float = 0.14
-    batt_to_load_remuneration_eur_per_kwh: float = 0.14
-    capex_batt_E_eur_per_kwh: float = 190.0
+    batt_to_load_remuneration_eur_per_kwh: float = 0.18
+    capex_batt_E_eur_per_kwh: float = 245
     # Laufende Kosten (veränderbar)
     storage_opex_pct_of_invest_per_year: float = 0.01
     meter_cost_eur_per_year: float = 300.0
     marketer_share_of_battery_revenue: float = 0.10
     pv_direct_marketing_cost_eur_per_month: float = 60.0
+    # Kopplung E/P in Stunden (zulässig: 2h oder 4h)
+    storage_duration_hours: float = 2.0
 
     batt_E_bounds: tuple[float, float] = (0.0, 120000.0)
     fixed_batt_E_kwh: float | None = None
@@ -285,12 +287,15 @@ def build_model(prices: np.ndarray, pv_per_kwp: np.ndarray, load: np.ndarray, in
         m.E_max.fix(inp.fixed_batt_E_kwh)
         m.P_max.fix(inp.fixed_batt_P_kw)
 
+    if inp.storage_duration_hours not in (2.0, 4.0):
+        raise ValueError("storage_duration_hours muss 2.0 oder 4.0 sein.")
+
     # Lineares Big-M für Lade-/Entlade-Logik (verhindert Nichtlinearität mm.P_max * binary)
     if inp.fixed_batt_P_kw is not None:
         p_big_m = float(inp.fixed_batt_P_kw)
     else:
-        # Bei 2h-Beziehung gilt P_max = E_max / 2
-        p_big_m = float(inp.batt_E_bounds[1]) / 2.0
+        # Bei E/P-Kopplung gilt P_max = E_max / storage_duration_hours
+        p_big_m = float(inp.batt_E_bounds[1]) / float(inp.storage_duration_hours)
     if p_big_m <= 0:
         raise ValueError("Ungültiges Big-M für Leistung. Bitte batt_E_bounds oder fixed_batt_P_kw prüfen.")
 
@@ -343,9 +348,9 @@ def build_model(prices: np.ndarray, pv_per_kwp: np.ndarray, load: np.ndarray, in
     m.charge_or_discharge_1 = Constraint(m.T, rule=lambda mm, t: mm.ch[t] <= p_big_m * mm.is_charging[t])
     m.charge_or_discharge_2 = Constraint(m.T, rule=lambda mm, t: mm.dis[t] <= p_big_m * (1 - mm.is_charging[t]))
 
-    # 2h Speicher nur im Optimierungsmodus
+    # E/P-Kopplung nur im Optimierungsmodus
     if optimize_battery_size:
-        m.storage_2h = Constraint(expr=m.E_max == 2.0 * m.P_max)
+        m.storage_duration_coupling = Constraint(expr=m.E_max == float(inp.storage_duration_hours) * m.P_max)
 
     def objective_rule(mm):
         degr_mult = capacity_degradation_multiplier(inp)
@@ -493,6 +498,27 @@ def evaluate_results(model: ConcreteModel, prices: np.ndarray, pv_per_kwp: np.nd
     annual_pv_to_load_remuneration_eur = inp.pv_to_load_remuneration_eur_per_kwh * annual_pv_to_load_kwh
     annual_batt_to_load_remuneration_eur = inp.batt_to_load_remuneration_eur_per_kwh * annual_batt_to_load_kwh
 
+    annual_charge_total_kwh = float(np.sum(ch))
+    annual_charge_at_zero_opp_price_kwh = float(np.sum(ch[opp_price <= 1e-12]))
+    if inp.pv_size_kwp >= 1000.0:
+        opportunity_price_floor_eur_per_kwh = 0.096
+    else:
+        opportunity_price_floor_eur_per_kwh = anzulegender_mischpreis_eur_per_kwh(inp.pv_size_kwp)
+    charge_at_floor_mask = (prices > 0.0) & np.isclose(
+        opp_price,
+        opportunity_price_floor_eur_per_kwh,
+        atol=1e-12,
+        rtol=1e-9,
+    )
+    annual_charge_at_opp_price_floor_kwh = float(np.sum(ch[charge_at_floor_mask]))
+
+    if annual_charge_total_kwh > 0:
+        annual_charge_at_zero_opp_price_pct = 100.0 * annual_charge_at_zero_opp_price_kwh / annual_charge_total_kwh
+        annual_charge_at_opp_price_floor_pct = 100.0 * annual_charge_at_opp_price_floor_kwh / annual_charge_total_kwh
+    else:
+        annual_charge_at_zero_opp_price_pct = 0.0
+        annual_charge_at_opp_price_floor_pct = 0.0
+
     max_soc_kwh = float(np.max(soc))
     max_charge_kwh_per_hour = float(np.max(ch))
     max_discharge_kwh_per_hour = float(np.max(dis))
@@ -535,6 +561,12 @@ def evaluate_results(model: ConcreteModel, prices: np.ndarray, pv_per_kwp: np.nd
         "annual_curtailment_kwh": annual_curtailment_kwh,
         "annual_pv_to_load_remuneration_eur": annual_pv_to_load_remuneration_eur,
         "annual_batt_to_load_remuneration_eur": annual_batt_to_load_remuneration_eur,
+        "annual_charge_total_kwh": annual_charge_total_kwh,
+        "annual_charge_at_zero_opp_price_kwh": annual_charge_at_zero_opp_price_kwh,
+        "annual_charge_at_zero_opp_price_pct": annual_charge_at_zero_opp_price_pct,
+        "opportunity_price_floor_eur_per_kwh": opportunity_price_floor_eur_per_kwh,
+        "annual_charge_at_opp_price_floor_kwh": annual_charge_at_opp_price_floor_kwh,
+        "annual_charge_at_opp_price_floor_pct": annual_charge_at_opp_price_floor_pct,
         "max_soc_kwh": max_soc_kwh,
         "max_charge_kwh_per_hour": max_charge_kwh_per_hour,
         "max_discharge_kwh_per_hour": max_discharge_kwh_per_hour,
@@ -587,6 +619,12 @@ def print_results(results: dict, inp: Inputs):
     print(f"Netzeinspeisung gesamt (PV+BATT):     {results['annual_feed_in_total_kwh']:,.2f} kWh/a")
     print(f"PV -> Last:                           {results['annual_pv_to_load_kwh']:,.2f} kWh/a")
     print(f"Batterie -> Last:                     {results['annual_batt_to_load_kwh']:,.2f} kWh/a")
+    print(f"Batterieladung gesamt:                {results['annual_charge_total_kwh']:,.2f} kWh/a")
+    print(f"Ladung bei 0 ct (Spot <= 0):          {results['annual_charge_at_zero_opp_price_kwh']:,.2f} kWh/a ({results['annual_charge_at_zero_opp_price_pct']:,.2f} %)" )
+    print(
+        f"Ladung beim Opportunitäts-Preisfloor ({100*results['opportunity_price_floor_eur_per_kwh']:,.2f} ct/kWh): "
+        f"{results['annual_charge_at_opp_price_floor_kwh']:,.2f} kWh/a ({results['annual_charge_at_opp_price_floor_pct']:,.2f} %)"
+    )
     print(f"Abregelung gesamt:                    {results['annual_curtailment_kwh']:,.2f} kWh/a")
     print(f"Vergütung PV -> Last:                 {results['annual_pv_to_load_remuneration_eur']:,.2f} € /a")
     print(f"Vergütung Batterie -> Last:           {results['annual_batt_to_load_remuneration_eur']:,.2f} € /a")
